@@ -1,0 +1,63 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Ontario Energy Demand Forecasting Lambda
+
+Parameters:
+  ModelBucket:
+    Type: String
+    Default: energy-forecast-nishan
+    Description: S3 bucket containing the model
+  
+  OutputBucket:
+    Type: String
+    Default: energy-forecast-nishan
+    Description: S3 bucket for forecast output
+
+Resources:
+  EnergyForecastFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ontario-demand-forecast
+      PackageType: Image
+      MemorySize: 3008
+      Timeout: 300
+      Environment:
+        Variables:
+          MODEL_BUCKET: !Ref ModelBucket
+          OUTPUT_BUCKET: !Ref OutputBucket
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref ModelBucket
+        - S3CrudPolicy:
+            BucketName: !Ref OutputBucket
+    Metadata:
+      Dockerfile: Dockerfile
+      DockerContext: .
+      DockerTag: latest
+
+  DailyForecastSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Trigger energy forecast daily at 12 AM UTC
+      ScheduleExpression: cron(0 0 * * ? *)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt EnergyForecastFunction.Arn
+          Id: DailyForecastTarget
+
+  ForecastFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref EnergyForecastFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DailyForecastSchedule.Arn
+
+Outputs:
+  FunctionArn:
+    Description: Lambda Function ARN
+    Value: !GetAtt EnergyForecastFunction.Arn
+  
+  FunctionName:
+    Description: Lambda Function Name
+    Value: !Ref EnergyForecastFunction
