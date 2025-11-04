@@ -1,0 +1,14 @@
+/lambdaFolder/boto3
+/lambdaFolder/dateutil
+/lambdaFolder/certifi
+/lambdaFolder/botocore
+/lambdaFolder/requests
+/lambdaFolder/s3transfer
+/lambdaFolder/pandas
+/lambdaFolder/numpy
+/lambdaFolder/tzdata
+/lambdaFolder/urllib3
+/lambdaFolder/bin
+/lambdaFolder/jmespath
+/lambdaFolder/pytz
+/lambdaFolder/idna
