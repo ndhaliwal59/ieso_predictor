@@ -2,9 +2,27 @@ import json
 import boto3
 import os
 from datetime import datetime, timedelta
+
+# DISABLE CUDA IMMEDIATELY - BEFORE ALL OTHER IMPORTS
+os.environ['CUDA_VISIBLE_DEVICES'] = ''
+os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
+os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+
 import pandas as pd
 import numpy as np
 import torch
+
+# Force CPU-only mode - critical for Lambda
+torch.cuda.is_available = lambda: False
+torch.cuda.init = lambda: None
+torch.backends.cudnn.enabled = False
+
+# Prevent CUDA initialization entirely - CRITICAL FIX
+if hasattr(torch._C, '_cuda_init'):
+    torch._C._cuda_init = lambda: None
+if hasattr(torch._C, '_cuda_getDeviceCount'):
+    torch._C._cuda_getDeviceCount = lambda: 0
+
 import tempfile
 from io import BytesIO
 import warnings
@@ -18,8 +36,14 @@ from pytorch_forecasting.data import GroupNormalizer
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+# Additional CUDA disabling
+torch.cuda.is_available = lambda: False
+
 warnings.filterwarnings('ignore')
 pl.seed_everything(42, workers=True)
+
+# Set PyTorch Lightning to CPU mode
+os.environ['PL_TORCH_DISTRIBUTED_BACKEND'] = 'gloo'
 
 s3_client = boto3.client('s3')
 
@@ -27,7 +51,6 @@ MODEL_BUCKET = "energy-forecast-nishan"
 MODEL_PREFIX = "models/current/"
 OUTPUT_BUCKET = "energy-forecast-nishan"
 OUTPUT_PREFIX = "daily_prediction/"
-
 
 def download_from_s3(bucket, prefix, local_path):
     """Download file from S3 to local path"""
@@ -37,13 +60,11 @@ def download_from_s3(bucket, prefix, local_path):
         f.write(response['Body'].read())
     logger.info(f"Downloaded successfully to {local_path}")
 
-
 def upload_to_s3(local_path, bucket, key):
     """Upload file to S3"""
     logger.info(f"Uploading {local_path} to s3://{bucket}/{key}")
     s3_client.upload_file(local_path, bucket, key)
     logger.info(f"Upload successful")
-
 
 def load_historical_data():
     """
@@ -88,7 +109,6 @@ def load_historical_data():
     
     logger.info(f"Preprocessing complete. Final shape: {df.shape}")
     return df
-
 
 def lambda_handler(event, context):
     """AWS Lambda handler for daily Ontario demand forecasting"""
@@ -178,33 +198,127 @@ def lambda_handler(event, context):
             logger.info("Prediction dataloader created")
             
             # Load model
-            logger.info("Step 6: Loading TFT model from checkpoint")
-            tft = TemporalFusionTransformer.load_from_checkpoint(model_path)
-            tft.eval()
-            logger.info("Model loaded and set to eval mode")
+            logger.info("Step 6: Loading TFT model from checkpoint (CPU-safe manual load)")
             
-            # Generate predictions
-            logger.info("Step 7: Generating predictions")
-            with torch.no_grad():
-                raw_predictions = tft.predict(
-                    predict_loader,
-                    mode="prediction",
-                    return_x=False,
-                    return_index=False
+            # load checkpoint with torch directly (CPU-mapped)
+            ckpt = torch.load(model_path, map_location="cpu")
+            logger.info("Checkpoint loaded with torch.load (map_location=cpu)")
+            
+            # extract the saved state_dict (Lightning saves under 'state_dict')
+            if "state_dict" in ckpt:
+                state_dict = ckpt["state_dict"]
+            else:
+                state_dict = ckpt
+            
+            # remove potential device references inside hyper_parameters if present
+            hyperparams = ckpt.get("hyper_parameters", {}) or {}
+            if "device" in hyperparams:
+                hyperparams.pop("device", None)
+            
+            # Build new model from saved hyperparameters
+            model_kwargs = {}
+            for k in ("learning_rate", "hidden_size", "attention_head_size",
+                    "dropout", "hidden_continuous_size"):
+                if k in hyperparams:
+                    model_kwargs[k] = hyperparams[k]
+            
+            # Fallback defaults
+            if "hidden_size" not in model_kwargs:
+                model_kwargs["hidden_size"] = 32
+            if "attention_head_size" not in model_kwargs:
+                model_kwargs["attention_head_size"] = 4
+            if "dropout" not in model_kwargs:
+                model_kwargs["dropout"] = 0.1
+            if "hidden_continuous_size" not in model_kwargs:
+                model_kwargs["hidden_continuous_size"] = 16
+            if "learning_rate" not in model_kwargs:
+                model_kwargs["learning_rate"] = 1e-3
+            
+            logger.info(f"Attempting to instantiate TFT with params: {model_kwargs}")
+            
+            try:
+                tft = TemporalFusionTransformer.from_dataset(
+                    training,
+                    learning_rate=model_kwargs["learning_rate"],
+                    hidden_size=model_kwargs["hidden_size"],
+                    attention_head_size=model_kwargs["attention_head_size"],
+                    dropout=model_kwargs["dropout"],
+                    hidden_continuous_size=model_kwargs["hidden_continuous_size"],
                 )
+                logger.info("TemporalFusionTransformer architecture instantiated (CPU)")
+            except Exception as e:
+                logger.error("Failed to instantiate TFT from_dataset, falling back to generic constructor", exc_info=True)
+                tft = TemporalFusionTransformer.from_dataset(
+                    training,
+                    hidden_size=model_kwargs.get("hidden_size", 32),
+                    attention_head_size=model_kwargs.get("attention_head_size", 4),
+                    hidden_continuous_size=model_kwargs.get("hidden_continuous_size", 16),
+                )
+            
+            # Normalize keys: remove leading "model." if present
+            new_state = {}
+            for k, v in state_dict.items():
+                new_key = k
+                if k.startswith("model."):
+                    new_key = k[len("model."):]
+                new_state[new_key] = v
+            
+            # load into our freshly created tft
+            missing, unexpected = tft.load_state_dict(new_state, strict=False)
+            logger.info(f"Loaded state_dict into tft (missing keys: {len(missing)}, unexpected keys: {len(unexpected)})")
+            
+            # force CPU and eval
+            tft = tft.cpu()
+            tft.eval()
+            logger.info("Model moved to CPU and set to eval()")
+            
+            # ===== MANUAL PREDICTION (AVOID tft.predict() which creates a Trainer) =====
+            logger.info("Step 7: Generating predictions manually (no Trainer)")
+            
+            all_predictions = []
+            with torch.no_grad():
+                for batch_idx, (x, y) in enumerate(predict_loader):
+                    # Move batch to CPU (should already be there, but ensure)
+                    if isinstance(x, dict):
+                        x = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in x.items()}
+                    else:
+                        x = x.cpu()
+                    
+                    # Forward pass
+                    output = tft(x)
+                    
+                    # Extract predictions - output structure depends on TFT configuration
+                    if isinstance(output, dict) and "prediction" in output:
+                        pred = output["prediction"]
+                    elif isinstance(output, tuple):
+                        pred = output[0]
+                    else:
+                        pred = output
+                    
+                    # Convert to numpy
+                    pred_np = pred.detach().cpu().numpy()
+                    all_predictions.append(pred_np)
+                    
+                    logger.info(f"Processed batch {batch_idx + 1}/{len(predict_loader)}")
+            
             logger.info("Predictions generated")
             
             # Extract predictions
             logger.info("Step 8: Extracting and reshaping predictions")
-            if isinstance(raw_predictions, torch.Tensor):
-                predictions = raw_predictions.detach().cpu().numpy()
-            else:
-                predictions = raw_predictions
             
+            # Concatenate all predictions
+            if len(all_predictions) > 0:
+                predictions = np.concatenate(all_predictions, axis=0)
+            else:
+                raise ValueError("No predictions generated")
+            
+            # Reshape if needed
             if predictions.ndim == 3:
-                predictions = predictions[0, :, 0]
+                # Shape is typically (batch, time, features) - take last batch and first feature
+                predictions = predictions[-1, :, 0]
             elif predictions.ndim == 2:
-                predictions = predictions[0, :]
+                # Shape is (batch, time) - take last batch
+                predictions = predictions[-1, :]
             else:
                 predictions = predictions.flatten()
             

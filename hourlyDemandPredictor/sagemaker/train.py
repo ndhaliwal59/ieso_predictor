@@ -48,6 +48,53 @@ def backup_current_model(bucket, current_key, versions_prefix):
         print(f"Could not backup model: {e}")
 
 
+def convert_checkpoint_to_cpu(checkpoint_path):
+    """
+    Convert a GPU checkpoint to CPU-compatible format.
+    This ensures Lambda can load it without CUDA errors.
+    """
+    print(f"\n{'='*60}")
+    print(f"Converting checkpoint to CPU-compatible format")
+    print(f"{'='*60}")
+    print(f"Checkpoint: {checkpoint_path}")
+    
+    # Load with CPU mapping
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    print(f"✓ Loaded checkpoint")
+    
+    # Convert all tensors in state_dict to CPU
+    if 'state_dict' in checkpoint:
+        print(f"✓ Converting state_dict tensors to CPU...")
+        tensor_count = 0
+        for key in list(checkpoint['state_dict'].keys()):
+            if torch.is_tensor(checkpoint['state_dict'][key]):
+                checkpoint['state_dict'][key] = checkpoint['state_dict'][key].cpu()
+                tensor_count += 1
+        print(f"  Converted {tensor_count} tensors")
+    
+    # Remove device references from hyperparameters
+    if 'hyper_parameters' in checkpoint:
+        if 'device' in checkpoint['hyper_parameters']:
+            print(f"✓ Removing device reference from hyperparameters")
+            del checkpoint['hyper_parameters']['device']
+    
+    # Process optimizer states if present
+    if 'optimizer_states' in checkpoint:
+        print(f"✓ Converting optimizer states to CPU...")
+        for opt_state in checkpoint['optimizer_states']:
+            if 'state' in opt_state:
+                for key, value in opt_state['state'].items():
+                    if isinstance(value, dict):
+                        for k, v in value.items():
+                            if torch.is_tensor(v):
+                                value[k] = v.cpu()
+    
+    # Save the CPU-compatible checkpoint
+    torch.save(checkpoint, checkpoint_path)
+    print(f"✓ Checkpoint saved in CPU-compatible format")
+    print(f"{'='*60}\n")
+
+
 def load_and_preprocess_data(data_path):
     """Load and preprocess the training data"""
     df = pd.read_csv(data_path)
@@ -80,7 +127,7 @@ def load_and_preprocess_data(data_path):
 
 def train_model(args):
     """Main training function"""
-    L.seed_everything(42, workers=True)  # CHANGED: pl → L
+    L.seed_everything(42, workers=True)
     
     # Check if data is already downloaded by SageMaker
     # SageMaker downloads training data to /opt/ml/input/data/training/
@@ -108,7 +155,7 @@ def train_model(args):
     
     print(f"Training samples: {len(training_df)}, Validation samples: {len(validation_df)}")
     
-    # SAME NORMALIZER AND DATASET LOGIC
+    # Create training dataset
     training = TimeSeriesDataSet(
         training_df,
         time_idx="time_idx",
@@ -137,7 +184,7 @@ def train_model(args):
         train=False, batch_size=batch_size * 2, num_workers=0, persistent_workers=False
     )
     
-    # SAME MODEL INITIALIZATION
+    # Initialize model
     tft = TemporalFusionTransformer.from_dataset(
         training,
         learning_rate=args.learning_rate,
@@ -150,7 +197,7 @@ def train_model(args):
         reduce_on_plateau_patience=3,
     )
     
-    # SAME CALLBACKS
+    # Setup callbacks
     checkpoint_callback = ModelCheckpoint(
         dirpath=args.model_dir,
         filename="tft_best_model",
@@ -167,7 +214,7 @@ def train_model(args):
         verbose=True
     )
     
-    # TRAINER WITH PYTORCH-LIGHTNING 2.1.0 COMPATIBILITY
+    # Initialize trainer
     trainer = L.Trainer(
         max_epochs=args.epochs,
         accelerator="auto",
@@ -176,7 +223,7 @@ def train_model(args):
         callbacks=[checkpoint_callback, early_stop],
         enable_progress_bar=True,
         enable_model_summary=True,
-        logger=None,  # CHANGED: False → None for 2.x
+        logger=None,
     )
     
     print("Starting training...")
@@ -184,13 +231,25 @@ def train_model(args):
     
     print(f"Best model saved at: {checkpoint_callback.best_model_path}")
     
-    # SAME VALIDATION METRICS LOGIC
-    loaded_tft = TemporalFusionTransformer.load_from_checkpoint(checkpoint_callback.best_model_path)
+    # ===== CRITICAL: CONVERT CHECKPOINT TO CPU FORMAT =====
+    # This ensures the Lambda inference function can load the model
+    # without CUDA/GPU errors
+    convert_checkpoint_to_cpu(checkpoint_callback.best_model_path)
+    # ======================================================
+    
+    # Load the converted checkpoint for validation
+    print("Loading converted checkpoint for validation...")
+    loaded_tft = TemporalFusionTransformer.load_from_checkpoint(
+        checkpoint_callback.best_model_path,
+        map_location='cpu'  # Ensure we load on CPU for validation
+    )
     loaded_tft.eval()
     
+    # Generate predictions
     with torch.no_grad():
         preds = loaded_tft.predict(val_loader)
     
+    # Extract actuals
     actuals_list = []
     for _, y in val_loader:
         if isinstance(y, (list, tuple)):
@@ -204,6 +263,7 @@ def train_model(args):
     actuals = torch.cat([t.detach().cpu().float() for t in actuals_list], dim=0)
     preds = preds.detach().cpu().float()
     
+    # Calculate metrics
     mae = torch.mean(torch.abs(actuals - preds)).item()
     rmse = torch.sqrt(torch.mean((actuals - preds) ** 2)).item()
     smape = torch.mean(200.0 * torch.abs(actuals - preds) / 
@@ -214,7 +274,7 @@ def train_model(args):
     print(f"  RMSE: {rmse:.2f}")
     print(f"  sMAPE: {smape:.2f}%")
     
-    # SAME METRICS SAVING
+    # Save metrics
     os.makedirs(args.output_data_dir, exist_ok=True)
     metrics_df = pd.DataFrame({
         'metric': ['MAE', 'RMSE', 'sMAPE'],
@@ -276,6 +336,7 @@ def main():
     
     print("\n" + "="*60)
     print("Training completed successfully!")
+    print("Model is now CPU-compatible for Lambda inference")
     print("="*60)
 
 
