@@ -16,7 +16,7 @@ Resources:
     Properties:
       FunctionName: ontario-demand-forecast
       PackageType: Image
-      MemorySize: 3008
+      MemorySize: 10240
       Timeout: 300
       Environment:
         Variables:
