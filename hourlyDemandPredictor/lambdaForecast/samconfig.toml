@@ -1,0 +1,13 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "ontario-forecast"
+resolve_s3 = true
+s3_prefix = "ontario-forecast"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "ModelBucket=\"energy-forecast-nishan\" OutputBucket=\"energy-forecast-nishan\""
+image_repositories = ["EnergyForecastFunction=914559461249.dkr.ecr.us-east-2.amazonaws.com/ontarioforecast83a583e8/energyforecastfunctiona5291e37repo"]
+
+[default.global.parameters]
+region = "us-east-2"

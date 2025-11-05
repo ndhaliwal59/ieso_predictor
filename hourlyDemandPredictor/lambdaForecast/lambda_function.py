@@ -39,7 +39,7 @@ def load_historical_data():
     Assumes your CSV is stored in S3 - adjust bucket/key as needed.
     """
     csv_bucket = "energy-forecast-nishan"
-    csv_key = "data/historical_demand.csv"
+    csv_key = "training_dataset/combined_demand_2002_2025.csv"
     
     try:
         response = s3_client.get_object(Bucket=csv_bucket, Key=csv_key)

@@ -7,13 +7,15 @@ import pandas as pd
 import numpy as np
 import torch
 
-import pytorch_lightning as pl  # FIXED: Changed from lightning.pytorch
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+import lightning as L  # CHANGED: pytorch_lightning → lightning for 2.x
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
 from pytorch_forecasting.data import GroupNormalizer
 from pytorch_forecasting.metrics import QuantileLoss
 
+
 s3_client = boto3.client('s3')
+
 
 def download_from_s3(s3_uri, local_path):
     """Download file from S3 to local path"""
@@ -22,12 +24,14 @@ def download_from_s3(s3_uri, local_path):
     s3_client.download_file(bucket, key, local_path)
     print(f"Downloaded {s3_uri} to {local_path}")
 
+
 def upload_to_s3(local_path, s3_uri):
     """Upload file from local path to S3"""
     bucket = s3_uri.split('/')[2]
     key = '/'.join(s3_uri.split('/')[3:])
     s3_client.upload_file(local_path, bucket, key)
     print(f"Uploaded {local_path} to {s3_uri}")
+
 
 def backup_current_model(bucket, current_key, versions_prefix):
     """Backup current model to versions folder with timestamp"""
@@ -42,6 +46,7 @@ def backup_current_model(bucket, current_key, versions_prefix):
         print("No current model found to backup (first training)")
     except Exception as e:
         print(f"Could not backup model: {e}")
+
 
 def load_and_preprocess_data(data_path):
     """Load and preprocess the training data"""
@@ -72,11 +77,12 @@ def load_and_preprocess_data(data_path):
     
     return df
 
+
 def train_model(args):
     """Main training function"""
-    pl.seed_everything(42, workers=True)
+    L.seed_everything(42, workers=True)  # CHANGED: pl → L
     
-    # FIXED: Check if data is already downloaded by SageMaker
+    # Check if data is already downloaded by SageMaker
     # SageMaker downloads training data to /opt/ml/input/data/training/
     sagemaker_data_path = '/opt/ml/input/data/training/main_training_data.csv'
     local_data_path = '/tmp/main_training_data.csv'
@@ -102,6 +108,7 @@ def train_model(args):
     
     print(f"Training samples: {len(training_df)}, Validation samples: {len(validation_df)}")
     
+    # SAME NORMALIZER AND DATASET LOGIC
     training = TimeSeriesDataSet(
         training_df,
         time_idx="time_idx",
@@ -130,6 +137,7 @@ def train_model(args):
         train=False, batch_size=batch_size * 2, num_workers=0, persistent_workers=False
     )
     
+    # SAME MODEL INITIALIZATION
     tft = TemporalFusionTransformer.from_dataset(
         training,
         learning_rate=args.learning_rate,
@@ -142,7 +150,7 @@ def train_model(args):
         reduce_on_plateau_patience=3,
     )
     
-    # FIXED: Save checkpoints to SageMaker model directory
+    # SAME CALLBACKS
     checkpoint_callback = ModelCheckpoint(
         dirpath=args.model_dir,
         filename="tft_best_model",
@@ -159,7 +167,8 @@ def train_model(args):
         verbose=True
     )
     
-    trainer = pl.Trainer(
+    # TRAINER WITH PYTORCH-LIGHTNING 2.1.0 COMPATIBILITY
+    trainer = L.Trainer(
         max_epochs=args.epochs,
         accelerator="auto",
         devices="auto",
@@ -167,7 +176,7 @@ def train_model(args):
         callbacks=[checkpoint_callback, early_stop],
         enable_progress_bar=True,
         enable_model_summary=True,
-        logger=False
+        logger=None,  # CHANGED: False → None for 2.x
     )
     
     print("Starting training...")
@@ -175,7 +184,7 @@ def train_model(args):
     
     print(f"Best model saved at: {checkpoint_callback.best_model_path}")
     
-    # Validation metrics
+    # SAME VALIDATION METRICS LOGIC
     loaded_tft = TemporalFusionTransformer.load_from_checkpoint(checkpoint_callback.best_model_path)
     loaded_tft.eval()
     
@@ -205,7 +214,7 @@ def train_model(args):
     print(f"  RMSE: {rmse:.2f}")
     print(f"  sMAPE: {smape:.2f}%")
     
-    # FIXED: Save metrics to output directory
+    # SAME METRICS SAVING
     os.makedirs(args.output_data_dir, exist_ok=True)
     metrics_df = pd.DataFrame({
         'metric': ['MAE', 'RMSE', 'sMAPE'],
@@ -217,6 +226,7 @@ def train_model(args):
     print(f"Saved metrics to {metrics_path}")
     
     return checkpoint_callback.best_model_path
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -267,6 +277,7 @@ def main():
     print("\n" + "="*60)
     print("Training completed successfully!")
     print("="*60)
+
 
 if __name__ == '__main__':
     main()
