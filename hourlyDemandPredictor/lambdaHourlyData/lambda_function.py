@@ -15,7 +15,7 @@ logger.setLevel(logging.INFO)
 
 S3_BUCKET = os.environ.get("S3_BUCKET", "energy-forecast-nishan")
 S3_PREFIX = os.environ.get("S3_PREFIX", "hourly_data/")
-MAIN_DATA_KEY = "datasets/main_training_data.csv"
+MAIN_DATA_KEY = "training_dataset/combined_demand_2002_2025.csv"
 
 s3 = boto3.client("s3")
 
@@ -97,7 +97,7 @@ def append_to_main_dataset(bucket, new_row):
         existing = pd.read_csv(io.BytesIO(obj["Body"].read()))
     except s3.exceptions.NoSuchKey:
         # Create new file if missing
-        existing = pd.DataFrame(columns=["Date", "Hour", "OntarioDemand"])
+        existing = pd.DataFrame(columns=["Date", "Hour", "Ontario Demand"])
 
     # Append new row
     updated = pd.concat([existing, pd.DataFrame([new_row])], ignore_index=True)
@@ -144,7 +144,7 @@ def lambda_handler(event, context):
         new_row = {
             "Date": payload["data"].get("ReportForDate"),
             "Hour": payload["data"].get("OntarioDemandHour"),
-            "OntarioDemand": payload["data"].get("OntarioDemand")
+            "Ontario Demand": payload["data"].get("OntarioDemand")
         }
         append_to_main_dataset(S3_BUCKET, new_row)
     except Exception as e:
