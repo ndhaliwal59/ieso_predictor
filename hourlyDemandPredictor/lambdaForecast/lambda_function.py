@@ -153,20 +153,45 @@ def lambda_handler(event, context):
             logger.info("TimeSeriesDataSet created successfully")
             
             # Prepare prediction data
-            logger.info("Step 4: Preparing prediction data")
+            # Step 4: Preparing prediction data for TODAY (current calendar day)
+            logger.info("Step 4: Preparing prediction data for current day")
+
+            # Get today's date (the day that just started at midnight)
+            now = datetime.now()
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            today_end = today_start + timedelta(hours=23)
+
+            logger.info(f"Forecasting for: {today_start.date()}")
+            logger.info(f"Current time: {now}")
+
+            # Calculate the last data point
             last_time = df["time"].max()
-            last_time_idx = df["time_idx"].max()
             last_demand = df["Ontario Demand"].iloc[-1]
-            
+
             logger.info(f"Last time in data: {last_time}")
-            logger.info(f"Forecasting next {max_prediction_length} hours")
-            
+
+            # Calculate hours from last data point to reach today's midnight (if needed)
+            # then add 24 hours for the full day
+            if last_time < today_start:
+                # Need to fill gap to reach today's midnight
+                hours_gap = int((today_start - last_time).total_seconds() / 3600)
+                total_hours = hours_gap + max_prediction_length
+                start_time = last_time + pd.Timedelta(hours=1)
+            else:
+                # Already at or past midnight, just predict remaining hours
+                hours_gap = 0
+                total_hours = max_prediction_length
+                start_time = last_time + pd.Timedelta(hours=1)
+
+            logger.info(f"Generating {total_hours} hours of predictions")
+
+            # Generate future times
             future_times = pd.date_range(
-                start=last_time + pd.Timedelta(hours=1),
-                periods=max_prediction_length,
+                start=start_time,
+                periods=total_hours,
                 freq="h"
             )
-            
+
             future_rows = pd.DataFrame({
                 "time": future_times,
                 "series": "ON",
@@ -175,11 +200,12 @@ def lambda_handler(event, context):
                 "day_of_week": future_times.dayofweek.astype("int8"),
                 "month": future_times.month.astype("int8"),
             })
-            
+
             future_rows["time_idx"] = ((future_rows["time"] - df["time"].min()).dt.total_seconds() // 3600).astype(int)
-            
+
             prediction_df = pd.concat([df, future_rows], ignore_index=True)
             logger.info(f"Prediction dataframe shape: {prediction_df.shape}")
+
             
             # Create prediction dataset
             logger.info("Step 5: Creating prediction dataset")
@@ -303,43 +329,79 @@ def lambda_handler(event, context):
             
             logger.info("Predictions generated")
             
-            # Extract predictions
+            # Step 8: Extracting and filtering predictions for current day
             logger.info("Step 8: Extracting and reshaping predictions")
-            
+
             # Concatenate all predictions
             if len(all_predictions) > 0:
                 predictions = np.concatenate(all_predictions, axis=0)
             else:
                 raise ValueError("No predictions generated")
-            
+
+            logger.info(f"Raw predictions shape after concatenation: {predictions.shape}")
+
             # Reshape if needed
             if predictions.ndim == 3:
                 # Shape is typically (batch, time, features) - take last batch and first feature
                 predictions = predictions[-1, :, 0]
+                logger.info(f"Reshaped from 3D: extracted last batch, first feature")
             elif predictions.ndim == 2:
                 # Shape is (batch, time) - take last batch
                 predictions = predictions[-1, :]
+                logger.info(f"Reshaped from 2D: extracted last batch")
             else:
                 predictions = predictions.flatten()
-            
-            predictions = predictions[:max_prediction_length]
-            logger.info(f"Final predictions shape: {predictions.shape}")
+                logger.info(f"Flattened predictions")
+
+            logger.info(f"Predictions shape after reshaping: {predictions.shape}")
+            logger.info(f"Predictions length: {len(predictions)}")
+            logger.info(f"Future times length: {len(future_times)}")
+
+            # *** CRITICAL FIX: Align predictions length with future_times ***
+            min_length = min(len(future_times), len(predictions))
+            future_times = future_times[:min_length]
+            predictions = predictions[:min_length]
+
+            logger.info(f"After alignment - future_times: {len(future_times)}, predictions: {len(predictions)}")
             logger.info(f"Prediction stats - Mean: {predictions.mean():.2f}, Min: {predictions.min():.2f}, Max: {predictions.max():.2f}")
-            
-            # Create output dataframe
-            logger.info("Step 9: Creating output dataframe")
+
+            # Filter predictions to only include TODAY'S 24 hours (00:00 to 23:00)
+            logger.info("Filtering predictions for current calendar day only")
+
+            today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            today_end = today_start + timedelta(hours=23)
+
+            logger.info(f"Target forecast date: {today_start.date()}")
+            logger.info(f"Filtering for hours between {today_start} and {today_end}")
+
+            # Create mask for today's hours
+            today_mask = (future_times >= today_start) & (future_times <= today_end)
+            today_times = future_times[today_mask]
+            today_predictions = predictions[today_mask]
+
+            logger.info(f"Filtered to {len(today_predictions)} hours for today ({today_start.date()})")
+
+            if len(today_predictions) != 24:
+                logger.warning(f"WARNING: Expected 24 hours but got {len(today_predictions)}!")
+                logger.warning(f"First prediction time: {future_times[0]}")
+                logger.warning(f"Last prediction time: {future_times[-1]}")
+
+            # Create output dataframe with today's predictions only
             output_df = pd.DataFrame({
-                "time": future_times[:len(predictions)],
-                "predicted_ontario_demand": predictions,
-                "horizon_hour_ahead": np.arange(1, len(predictions) + 1),
-                "hour_of_day": future_times[:len(predictions)].hour,
-                "day_of_week": future_times[:len(predictions)].dayofweek,
+                "time": today_times,
+                "predicted_ontario_demand": today_predictions,
+                "forecast_date": today_start.date(),
+                "hour_of_day": today_times.hour,
+                "day_of_week": today_times.dayofweek,
             })
-            
+
             output_df['day_part'] = output_df['hour_of_day'].apply(
                 lambda h: 'Night' if h < 6 or h >= 22 else 'Morning' if h < 12 else 'Afternoon' if h < 18 else 'Evening'
             )
+
             logger.info(f"Output dataframe shape: {output_df.shape}")
+            logger.info(f"Output covers hours {output_df['hour_of_day'].min()} to {output_df['hour_of_day'].max()}")
+            logger.info(f"Final prediction stats - Mean: {today_predictions.mean():.2f}, Min: {today_predictions.min():.2f}, Max: {today_predictions.max():.2f}")
             
             # Save to S3
             logger.info("Step 10: Saving forecast to S3")

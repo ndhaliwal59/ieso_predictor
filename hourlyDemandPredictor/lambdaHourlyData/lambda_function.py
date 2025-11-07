@@ -5,7 +5,8 @@ import logging
 from datetime import datetime, timezone
 import boto3
 import requests
-import pandas as pd  # Make sure this is in your requirements.txt
+import pandas as pd
+
 
 # -------------------------------
 # Configuration
@@ -13,13 +14,17 @@ import pandas as pd  # Make sure this is in your requirements.txt
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+
 S3_BUCKET = os.environ.get("S3_BUCKET", "energy-forecast-nishan")
 S3_PREFIX = os.environ.get("S3_PREFIX", "hourly_data/")
 MAIN_DATA_KEY = "training_dataset/combined_demand_2002_2025.csv"
 
+
 s3 = boto3.client("s3")
 
+
 IESO_URL = "https://www.ieso.ca/ieso/api/HomePageWebApi/getHomePageData"
+
 
 
 # -------------------------------
@@ -30,6 +35,7 @@ def fetch_ieso():
     resp = requests.get(IESO_URL, timeout=15)
     resp.raise_for_status()
     return resp.json()
+
 
 
 def build_payload(raw):
@@ -57,6 +63,7 @@ def build_payload(raw):
         }
     }
 
+
     # Derived metrics
     try:
         total_supply = (
@@ -72,7 +79,9 @@ def build_payload(raw):
     except Exception as e:
         logger.warning("Failed to compute derived fields: %s", e)
 
+
     return extracted
+
 
 
 def s3_put_json(bucket, key, payload):
@@ -82,12 +91,14 @@ def s3_put_json(bucket, key, payload):
     logger.info("Uploaded hourly JSON to s3://%s/%s", bucket, key)
 
 
+
 def make_s3_key(prefix):
     """Generate a time-based S3 key (e.g., hourly_data/2025-11-03T15-00Z.json)."""
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
     filename = f"{ts}.json"
     prefix = prefix if prefix.endswith("/") else prefix + "/"
     return f"{prefix}{filename}"
+
 
 
 def append_to_main_dataset(bucket, new_row):
@@ -99,8 +110,10 @@ def append_to_main_dataset(bucket, new_row):
         # Create new file if missing
         existing = pd.DataFrame(columns=["Date", "Hour", "Ontario Demand"])
 
+
     # Append new row
     updated = pd.concat([existing, pd.DataFrame([new_row])], ignore_index=True)
+
 
     # Write back to S3
     with io.StringIO() as csv_buffer:
@@ -112,7 +125,9 @@ def append_to_main_dataset(bucket, new_row):
             ContentType="text/csv"
         )
 
+
     logger.info("Main dataset updated with new row: %s", new_row)
+
 
 
 # -------------------------------
@@ -121,6 +136,7 @@ def append_to_main_dataset(bucket, new_row):
 def lambda_handler(event, context):
     logger.info("Starting hourly fetch lambda")
 
+
     # Step 1: Fetch from API
     try:
         raw = fetch_ieso()
@@ -128,8 +144,10 @@ def lambda_handler(event, context):
         logger.exception("Error fetching from IESO: %s", e)
         raise
 
+
     # Step 2: Build structured payload
     payload = build_payload(raw)
+
 
     # Step 3: Upload the hourly JSON
     key = make_s3_key(S3_PREFIX)
@@ -139,17 +157,24 @@ def lambda_handler(event, context):
         logger.exception("Error uploading hourly JSON to S3: %s", e)
         raise
 
-    # Step 4: Append new row to training dataset
+
+    #    # Step 4: Append new row to training dataset
     try:
+        # Use today's date instead of ReportForDate
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        
         new_row = {
-            "Date": payload["data"].get("ReportForDate"),
+            "Date": today,
             "Hour": payload["data"].get("OntarioDemandHour"),
             "Ontario Demand": payload["data"].get("OntarioDemand")
         }
         append_to_main_dataset(S3_BUCKET, new_row)
+        logger.info("Row appended for date: %s, hour: %s", today, new_row["Hour"])
     except Exception as e:
         logger.exception("Error appending new row to dataset: %s", e)
         raise
+
+
 
     logger.info("Fetch complete — JSON and CSV updated.")
     return {
