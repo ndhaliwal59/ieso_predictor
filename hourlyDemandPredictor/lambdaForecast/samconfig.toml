@@ -8,6 +8,7 @@ confirm_changeset = true
 capabilities = "CAPABILITY_IAM"
 parameter_overrides = "ModelBucket=\"energy-forecast-nishan\" OutputBucket=\"energy-forecast-nishan\""
 image_repositories = ["EnergyForecastFunction=914559461249.dkr.ecr.us-east-2.amazonaws.com/ontarioforecast83a583e8/energyforecastfunctiona5291e37repo"]
+disable_rollback = true
 
 [default.global.parameters]
 region = "us-east-2"
