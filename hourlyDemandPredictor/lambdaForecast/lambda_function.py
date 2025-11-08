@@ -369,13 +369,13 @@ def lambda_handler(event, context):
             logger.info("Filtering predictions for current calendar day only")
 
             today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-            today_end = today_start + timedelta(hours=23)
+            today_end = today_start + timedelta(hours=24)
 
             logger.info(f"Target forecast date: {today_start.date()}")
             logger.info(f"Filtering for hours between {today_start} and {today_end}")
 
             # Create mask for today's hours
-            today_mask = (future_times >= today_start) & (future_times <= today_end)
+            today_mask = (future_times >= today_start) & (future_times < today_end)
             today_times = future_times[today_mask]
             today_predictions = predictions[today_mask]
 
