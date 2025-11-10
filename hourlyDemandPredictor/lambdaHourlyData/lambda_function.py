@@ -166,7 +166,7 @@ def lambda_handler(event, context):
         # Calculate minutes past midnight for window check
         minutes_past_midnight = toronto_now.hour * 60 + toronto_now.minute
         
-        if 7 <= minutes_past_midnight <= 67:  # 00:07 to 01:07 Toronto time
+        if 0 <= minutes_past_midnight <= 60:  # 00:07 to 01:07 Toronto time
             # Adjust for previous day: Hour 24
             previous_date = toronto_now.date() - timedelta(days=1)
             local_date = previous_date.strftime("%Y-%m-%d")
