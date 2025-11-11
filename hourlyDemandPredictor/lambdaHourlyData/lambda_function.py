@@ -9,6 +9,7 @@ import requests
 import pandas as pd
 
 
+
 # -------------------------------
 # Configuration
 # -------------------------------
@@ -16,19 +17,25 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 
+
 S3_BUCKET = os.environ.get("S3_BUCKET", "energy-forecast-nishan")
 S3_PREFIX = os.environ.get("S3_PREFIX", "hourly_data/")
 MAIN_DATA_KEY = "training_dataset/combined_demand_2002_2025.csv"
+DAILY_DATA_KEY = "training_dataset/daily.csv"
+
 
 
 s3 = boto3.client("s3")
 
 
+
 IESO_URL = "https://www.ieso.ca/ieso/api/HomePageWebApi/getHomePageData"
+
 
 
 # Toronto timezone (handles EST/EDT automatically)
 TORONTO_TZ = ZoneInfo("America/Toronto")
+
 
 
 # -------------------------------
@@ -39,6 +46,7 @@ def fetch_ieso():
     resp = requests.get(IESO_URL, timeout=15)
     resp.raise_for_status()
     return resp.json()
+
 
 
 def build_payload(raw):
@@ -67,6 +75,7 @@ def build_payload(raw):
     }
 
 
+
     # Derived metrics
     try:
         total_supply = (
@@ -83,7 +92,9 @@ def build_payload(raw):
         logger.warning("Failed to compute derived fields: %s", e)
 
 
+
     return extracted
+
 
 
 def s3_put_json(bucket, key, payload):
@@ -93,12 +104,14 @@ def s3_put_json(bucket, key, payload):
     logger.info("Uploaded hourly JSON to s3://%s/%s", bucket, key)
 
 
+
 def make_s3_key(prefix):
     """Generate a time-based S3 key (e.g., hourly_data/2025-11-03T15-00Z.json)."""
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
     filename = f"{ts}.json"
     prefix = prefix if prefix.endswith("/") else prefix + "/"
     return f"{prefix}{filename}"
+
 
 
 def append_to_main_dataset(bucket, new_row):
@@ -111,8 +124,10 @@ def append_to_main_dataset(bucket, new_row):
         existing = pd.DataFrame(columns=["Date", "Hour", "Ontario Demand"])
 
 
+
     # Append new row
     updated = pd.concat([existing, pd.DataFrame([new_row])], ignore_index=True)
+
 
 
     # Write back to S3
@@ -126,7 +141,39 @@ def append_to_main_dataset(bucket, new_row):
         )
 
 
+
     logger.info("Main dataset updated with new row: %s", new_row)
+
+
+
+def append_to_daily_dataset(bucket, new_row):
+    """Append a new row to the daily dataset CSV stored in S3 with size management."""
+    try:
+        obj = s3.get_object(Bucket=bucket, Key=DAILY_DATA_KEY)
+        existing = pd.read_csv(io.BytesIO(obj["Body"].read()))
+    except s3.exceptions.NoSuchKey:
+        # Create new file if missing
+        existing = pd.DataFrame(columns=["Date", "Hour", "Ontario Demand"])
+
+    # Check if rows exceed 300, if so remove oldest 250 rows
+    if len(existing) > 300:
+        existing = existing.iloc[250:].reset_index(drop=True)
+        logger.info("Row limit exceeded. Removed oldest 250 rows. New row count: %d", len(existing))
+
+    # Append new row
+    updated = pd.concat([existing, pd.DataFrame([new_row])], ignore_index=True)
+
+    # Write back to S3
+    with io.StringIO() as csv_buffer:
+        updated.to_csv(csv_buffer, index=False)
+        s3.put_object(
+            Bucket=bucket,
+            Key=DAILY_DATA_KEY,
+            Body=csv_buffer.getvalue(),
+            ContentType="text/csv"
+        )
+
+    logger.info("Daily dataset updated with new row: %s", new_row)
 
 
 # -------------------------------
@@ -134,6 +181,7 @@ def append_to_main_dataset(bucket, new_row):
 # -------------------------------
 def lambda_handler(event, context):
     logger.info("Starting hourly fetch lambda")
+
 
 
     # Step 1: Fetch from API
@@ -144,8 +192,10 @@ def lambda_handler(event, context):
         raise
 
 
+
     # Step 2: Build structured payload
     payload = build_payload(raw)
+
 
 
     # Step 3: Upload the hourly JSON
@@ -157,7 +207,8 @@ def lambda_handler(event, context):
         raise
 
 
-    # Step 4: Append new row to training dataset
+
+    # Step 4: Append new row to training datasets
     try:
         # Convert UTC to Toronto local time
         utc_now = datetime.now(timezone.utc)
@@ -187,10 +238,13 @@ def lambda_handler(event, context):
             }
             logger.info("Standard row for date: %s, hour: %s", local_date, new_row["Hour"])
         
+        # Append to both datasets
         append_to_main_dataset(S3_BUCKET, new_row)
+        append_to_daily_dataset(S3_BUCKET, new_row)
     except Exception as e:
         logger.exception("Error appending new row to dataset: %s", e)
         raise
+
 
 
     logger.info("Fetch complete — JSON and CSV updated.")
@@ -199,6 +253,7 @@ def lambda_handler(event, context):
         "body": json.dumps({
             "message": "success",
             "s3_json_key": key,
-            "dataset_key": MAIN_DATA_KEY
+            "dataset_key": MAIN_DATA_KEY,
+            "daily_dataset_key": DAILY_DATA_KEY
         })
     }
